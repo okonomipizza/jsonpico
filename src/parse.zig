@@ -226,7 +226,18 @@ pub const JsonParser = struct {
             const char = self.getChar(self.idx) orelse break;
             if (char == ' ' or char == '\n') {
                 continue;
+            } else if (char == '/') {
+                self.skipComment();
             } else {
+                break;
+            }
+        }
+    }
+
+    fn skipComment(self: *Self) void {
+        while (true) : (self.idx += 1) {
+            const char = self.getChar(self.idx) orelse break;
+            if (char == '\n') {
                 break;
             }
         }
@@ -368,6 +379,22 @@ test "Parse object" {
         \\  "version" : 0.14
         \\}
     ;
+    const allocator = testing.allocator;
+
+    var parser = JsonParser.init(input);
+    var parsed = try parser.parse(allocator);
+    defer parsed.deinit();
+
+    try testing.expect(parsed == .object);
+    try testing.expectEqualStrings("zig", parsed.object.get("lang").?.string.items);
+    try testing.expectEqual(0.14, parsed.object.get("version").?.float);
+}
+
+test "Parse object of jsonc style" {
+    const input = "{\n" ++
+        "  \"lang\": \"zig\", // programming language\n" ++
+        "  \"version\" : 0.14\n" ++
+        "}";
     const allocator = testing.allocator;
 
     var parser = JsonParser.init(input);
