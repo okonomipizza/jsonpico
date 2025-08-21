@@ -224,7 +224,7 @@ pub const JsonParser = struct {
     fn skipWhite(self: *Self) void {
         while (true) : (self.idx += 1) {
             const char = self.getChar(self.idx) orelse break;
-            if (char == ' ') {
+            if (char == ' ' or char == '\n') {
                 continue;
             } else {
                 break;
@@ -362,7 +362,12 @@ test "Parse array" {
 }
 
 test "Parse object" {
-    const input = "{\"lang\": \"zig\", \"version\" : 0.14}";
+    const input =
+        \\{
+        \\  "lang": "zig",
+        \\  "version" : 0.14
+        \\}
+    ;
     const allocator = testing.allocator;
 
     var parser = JsonParser.init(input);
