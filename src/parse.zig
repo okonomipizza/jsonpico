@@ -8,23 +8,34 @@ pub const ParseError = error{
     SyntaxError,
     OutOfMemory,
     UnexpectedCharacter,
+    InvalidComment
+};
+
+pub const Comment = struct {
+    start: usize,
+    end: usize,
 };
 
 pub const JsonParser = struct {
     json_str: []const u8,
     idx: usize,
+    /// Store each comment's offset
+    comments: std.ArrayList(Comment),
 
     const Self = @This();
 
-    pub fn init(json_str: []const u8) Self {
+    pub fn init(allocator: Allocator, json_str: []const u8) Self {
+        const comments = std.ArrayList(Comment).init(allocator);
+
         return .{
             .json_str = json_str,
             .idx = 0,
+            .comments = comments,
         };
     }
 
-    pub fn deinit(self: Self) void {
-        self.arena.deinit();
+    pub fn deinit(self: *Self) void {
+       self.comments.deinit(); 
     }
 
     pub fn parse(self: *Self, allocator: Allocator) ParseError!JsonValue {
@@ -165,13 +176,13 @@ pub const JsonParser = struct {
                 // Found closing quote
                 return JsonValue{ .array = array };
             } else if (char == ' ') {
-                self.skipWhite();
+                try  self.skipWhiteAndComments();
                 self.idx -= 1;
             } else if (char == ',') {
                 if (commma) return error.SyntaxError;
                 commma = true;
                 self.idx += 1;
-                self.skipWhite();
+                try self.skipWhiteAndComments();
                 self.idx -= 1;
             } else {
                 if (commma) {
@@ -192,22 +203,22 @@ pub const JsonParser = struct {
         errdefer object.deinit();
 
         while (true) {
-            self.skipWhite();
+            try self.skipWhiteAndComments();
             var key = try self.parseString(allocator);
             self.idx += 1; // Skip last '"' of the key string
-            self.skipWhite();
+            try self.skipWhiteAndComments();
 
             if (self.getChar(self.idx) != ':') return error.SyntaxError;
 
             self.idx += 1;
-            self.skipWhite();
+            try self.skipWhiteAndComments();
 
             const value = try self.parse(allocator);
 
             try object.put(try key.toOwnedSlice(), value);
 
             self.idx += 1;
-            self.skipWhite();
+            try self.skipWhiteAndComments();
 
             if (self.getChar(self.idx) == ',') {
                 self.idx += 1;
@@ -221,24 +232,61 @@ pub const JsonParser = struct {
     }
 
     // Stop at next to last space
-    fn skipWhite(self: *Self) void {
+    fn skipWhiteAndComments(self: *Self) !void {
         while (true) : (self.idx += 1) {
             const char = self.getChar(self.idx) orelse break;
             if (char == ' ' or char == '\n') {
                 continue;
             } else if (char == '/') {
-                self.skipComment();
+                const comment = try self.parseComment() orelse continue;
+                try self.comments.append(comment);
             } else {
                 break;
             }
         }
     }
 
-    fn skipComment(self: *Self) void {
+    /// Parse comments
+    fn parseComment(self: *Self) !?Comment {
+        self.idx += 1;
+        var char: u8 = self.getChar(self.idx) orelse return null;
+        if (char != '/' and char != '*') return error.InvalidComment;
+        const start = self.idx; // Keep start offset of this comment
+        
+        // If starts with /*, it should be end with */ 
+        const is_multiline = blk: {
+            if (char == '*') break :blk true;
+            break :blk false;
+        };
+
+        self.idx += 1;
+
         while (true) : (self.idx += 1) {
-            const char = self.getChar(self.idx) orelse break;
+            char = self.getChar(self.idx) orelse {
+                if (is_multiline) return error.SyntaxError;
+                return Comment{
+                    .start = start,
+                    .end = self.idx,
+                };
+            };
+            
             if (char == '\n') {
-                break;
+                if (is_multiline) continue;
+                return Comment{
+                    .start = start,
+                    .end = self.idx,
+                };
+            } else if (char == '*') {
+                self.idx += 1;
+                char = self.getChar(self.idx) orelse return error.InvalidComment;
+                if (char == '/') {
+                    return Comment{
+                        .start = start,
+                        .end = self.idx,
+                    };
+                } else {
+                    return error.InvalidComment;
+                }
             }
         }
     }
@@ -255,7 +303,9 @@ test "Parse null" {
     const input = "null";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -266,7 +316,9 @@ test "Parse true" {
     const input = "true";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -278,7 +330,9 @@ test "Parse false" {
     const input = "false";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -290,7 +344,9 @@ test "Parse string" {
     const input = "\"Hello world\"";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -302,7 +358,9 @@ test "Parse integer" {
     const input = "123";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -314,7 +372,9 @@ test "Parse negative integer" {
     const input = "-45";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -326,7 +386,9 @@ test "Parse fraction" {
     const input = "14.1";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -337,7 +399,9 @@ test "Parse exponential plus" {
     const input = "1.23e+4";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -349,7 +413,9 @@ test "Parse exponential negative" {
     const input = "1.23e-4";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -361,7 +427,9 @@ test "Parse array" {
     const input = "[1, 2, 3]";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -381,7 +449,9 @@ test "Parse object" {
     ;
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
@@ -397,7 +467,31 @@ test "Parse object of jsonc style" {
         "}";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(input);
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
+    var parsed = try parser.parse(allocator);
+    defer parsed.deinit();
+
+    try testing.expect(parsed == .object);
+    try testing.expectEqualStrings("zig", parsed.object.get("lang").?.string.items);
+    try testing.expectEqual(0.14, parsed.object.get("version").?.float);
+}
+
+test "Parse object with multi-line comment" {
+    const input = "{\n" ++
+        "  /*\n" ++
+        "  multi-line\n" ++
+        "   comments\n" ++
+        "   */\n" ++
+        "  \"lang\": \"zig\", // programming language\n" ++
+        "  \"version\" : 0.14\n" ++
+        "}";
+    const allocator = testing.allocator;
+
+    var parser = JsonParser.init(allocator, input);
+    defer parser.deinit();
+
     var parsed = try parser.parse(allocator);
     defer parsed.deinit();
 
