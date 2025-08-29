@@ -1,0 +1,14 @@
+{
+    "restaurant": "Japanese Restaurant",
+    "menu": [
+        {
+            "category": "Appetizers",
+            "items": [
+                {"name": "Assorted Sashimi Platter", "price": 1500, "available": true},
+                {"name": "Chawanmushi", "price": 800, "available": false}
+            ]
+        }
+    ],
+    "location": null,
+    "rating": 4.5
+}
