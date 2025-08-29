@@ -247,11 +247,25 @@ pub const JsonParser = struct {
         }
     }
 
+    fn skipWhite(self: *Self) !void {
+        while (true): (self.idx += 1) {
+            const char = self.getChar(self.idx) orelse break;
+            if (char == ' ') {
+                continue;
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Parse comments
     fn parseComment(self: *Self) !?Comment {
         self.idx += 1;
         var char: u8 = self.getChar(self.idx) orelse return null;
         if (char != '/' and char != '*') return error.InvalidComment;
+        self.idx += 1;
+        try self.skipWhite();
+
         const start = self.idx; // Keep start offset of this comment
         
         // If starts with /*, it should be end with */ 
@@ -275,7 +289,7 @@ pub const JsonParser = struct {
                 if (is_multiline) continue;
                 return Comment{
                     .start = start,
-                    .end = self.idx,
+                    .end = self.idx - 1,
                 };
             } else if (char == '*') {
                 self.idx += 1;
@@ -283,7 +297,7 @@ pub const JsonParser = struct {
                 if (char == '/') {
                     return Comment{
                         .start = start,
-                        .end = self.idx,
+                        .end = self.idx - 2,
                     };
                 } else {
                     return error.InvalidComment;
@@ -477,6 +491,10 @@ test "Parse object of jsonc style" {
     try testing.expect(parsed == .object);
     try testing.expectEqualStrings("zig", parsed.object.get("lang").?.string.items);
     try testing.expectEqual(0.14, parsed.object.get("version").?.float);
+
+    const position = parser.comments.items[0];
+    const comment = parser.json_str[position.start..position.end + 1];
+    try testing.expectEqualStrings("programming language", comment);
 }
 
 test "Parse object with multi-line comment" {
@@ -485,7 +503,7 @@ test "Parse object with multi-line comment" {
         "  multi-line\n" ++
         "   comments\n" ++
         "   */\n" ++
-        "  \"lang\": \"zig\", // programming language\n" ++
+        "  \"lang\": \"zig\",\n" ++
         "  \"version\" : 0.14\n" ++
         "}";
     const allocator = testing.allocator;
@@ -499,4 +517,8 @@ test "Parse object with multi-line comment" {
     try testing.expect(parsed == .object);
     try testing.expectEqualStrings("zig", parsed.object.get("lang").?.string.items);
     try testing.expectEqual(0.14, parsed.object.get("version").?.float);
+
+    const position = parser.comments.items[0];
+    const comment = parser.json_str[position.start..position.end + 1];
+    try testing.expectEqualStrings("\n  multi-line\n   comments\n   ", comment);
 }
