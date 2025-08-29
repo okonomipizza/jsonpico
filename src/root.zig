@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 pub const JsonParser = @import("parse.zig").JsonParser;
+pub const Comment = @import("parse.zig").Comment;
 pub const JsonError = @import("type.zig").JsonError;
 pub const JsonValue = @import("type.zig").JsonValue;
 
