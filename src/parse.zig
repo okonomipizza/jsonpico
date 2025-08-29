@@ -24,8 +24,9 @@ pub const JsonParser = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: Allocator, json_str: []const u8) Self {
-        const comments = std.ArrayList(Comment).init(allocator);
+    pub fn init(allocator: Allocator, json_str: []const u8) !Self {
+        const comments = try std.ArrayList(Comment).initCapacity(allocator, 0);
+        errdefer comments.deinit(allocator);
 
         return .{
             .json_str = json_str,
@@ -34,8 +35,8 @@ pub const JsonParser = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
-       self.comments.deinit(); 
+    pub fn deinit(self: *Self, allocator: Allocator) void {
+       self.comments.deinit(allocator); 
     }
 
     pub fn parse(self: *Self, allocator: Allocator) ParseError!JsonValue {
@@ -75,7 +76,7 @@ pub const JsonParser = struct {
     }
 
     fn parseString(self: *Self, allocator: Allocator) ParseError!std.ArrayList(u8) {
-        var list = std.ArrayList(u8).init(allocator);
+        var list = try std.ArrayList(u8).initCapacity(allocator, 10);
 
         // Skip the opening quote
         self.idx += 1;
@@ -88,7 +89,7 @@ pub const JsonParser = struct {
                 // Found closing quote
                 return list;
             } else {
-                try list.append(char);
+                try list.append(allocator, char);
             }
         }
 
@@ -97,8 +98,8 @@ pub const JsonParser = struct {
     }
 
     fn parseNumber(self: *Self, allocator: Allocator) ParseError!JsonValue {
-        var bytes = std.ArrayList(u8).init(allocator);
-        defer bytes.deinit();
+        var bytes = try std.ArrayList(u8).initCapacity(allocator, 10);
+        defer bytes.deinit(allocator);
 
         var has_dot = false;
         var has_e = false;
@@ -106,13 +107,13 @@ pub const JsonParser = struct {
         while (self.idx < self.json_str.len) : (self.idx += 1) {
             switch (self.getChar(self.idx) orelse break) {
                 '0'...'9' => |digit| {
-                    try bytes.append(digit);
+                    try bytes.append(allocator, digit);
                 },
                 '-' => |minus| {
                     if (bytes.items.len == 0 or
                         (bytes.items.len > 0 and (bytes.items[bytes.items.len - 1] == 'e' or bytes.items[bytes.items.len - 1] == 'E')))
                     {
-                        try bytes.append(minus);
+                        try bytes.append(allocator, minus);
                     } else {
                         break;
                     }
@@ -120,7 +121,7 @@ pub const JsonParser = struct {
                 '.' => |dot| {
                     if (!has_dot and !has_e) {
                         has_dot = true;
-                        try bytes.append(dot);
+                        try bytes.append(allocator, dot);
                     } else {
                         break;
                     }
@@ -128,7 +129,7 @@ pub const JsonParser = struct {
                 'e', 'E' => |e| {
                     if (!has_e and bytes.items.len > 0) {
                         has_e = true;
-                        try bytes.append(e);
+                        try bytes.append(allocator, e);
                     } else {
                         break;
                     }
@@ -136,7 +137,7 @@ pub const JsonParser = struct {
                 '+' => |plus| {
                     // Only allow plus after 'e'/'E'
                     if (bytes.items.len > 0 and (bytes.items[bytes.items.len - 1] == 'e' or bytes.items[bytes.items.len - 1] == 'E')) {
-                        try bytes.append(plus);
+                        try bytes.append(allocator, plus);
                     } else {
                         break;
                     }
@@ -164,7 +165,7 @@ pub const JsonParser = struct {
     }
 
     fn parseArray(self: *Self, allocator: Allocator) ParseError!JsonValue {
-        var array = std.ArrayList(JsonValue).init(allocator);
+        var array = try std.ArrayList(JsonValue).initCapacity(allocator, 10);
 
         self.idx += 1; // Skip opening bracket
 
@@ -177,18 +178,18 @@ pub const JsonParser = struct {
                 // Found closing quote
                 return JsonValue{ .array = array };
             } else if (char == ' ' or char == '\n') {
-                try  self.skipWhiteAndComments();
+                try  self.skipWhiteAndComments(allocator);
                 self.idx -= 1;
             } else if (char == ',') {
                 if (commma) return error.SyntaxError;
                 commma = true;
                 self.idx += 1;
-                try self.skipWhiteAndComments();
+                try self.skipWhiteAndComments(allocator);
                 self.idx -= 1;
             } else {
                 if (commma) {
                     const parsed = try self.parse(allocator);
-                    try array.append(parsed);
+                    try array.append(allocator, parsed);
                     commma = false;
                 }
             }
@@ -204,22 +205,22 @@ pub const JsonParser = struct {
         errdefer object.deinit();
 
         while (true) {
-            try self.skipWhiteAndComments();
+            try self.skipWhiteAndComments(allocator);
             var key = try self.parseString(allocator);
             self.idx += 1; // Skip last '"' of the key string
-            try self.skipWhiteAndComments();
+            try self.skipWhiteAndComments(allocator);
 
             if (self.getChar(self.idx) != ':') return error.SyntaxError;
 
             self.idx += 1;
-            try self.skipWhiteAndComments();
+            try self.skipWhiteAndComments(allocator);
 
             const value = try self.parse(allocator);
 
-            try object.put(try key.toOwnedSlice(), value);
+            try object.put(try key.toOwnedSlice(allocator), value);
 
             self.idx += 1;
-            try self.skipWhiteAndComments();
+            try self.skipWhiteAndComments(allocator);
 
             if (self.getChar(self.idx) == ',') {
                 self.idx += 1;
@@ -233,14 +234,14 @@ pub const JsonParser = struct {
     }
 
     // Stop at next to last space
-    fn skipWhiteAndComments(self: *Self) !void {
+    fn skipWhiteAndComments(self: *Self, allocator: Allocator) !void {
         while (true) : (self.idx += 1) {
             const char = self.getChar(self.idx) orelse break;
             if (char == ' ' or char == '\n') {
                 continue;
             } else if (char == '/') {
                 const comment = try self.parseComment() orelse continue;
-                try self.comments.append(comment);
+                try self.comments.append(allocator, comment);
             } else {
                 break;
             }
@@ -318,11 +319,11 @@ test "Parse null" {
     const input = "null";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .null);
 }
@@ -331,11 +332,11 @@ test "Parse true" {
     const input = "true";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .bool);
     try testing.expect(parsed.bool == true);
@@ -345,11 +346,11 @@ test "Parse false" {
     const input = "false";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .bool);
     try testing.expect(parsed.bool == false);
@@ -359,11 +360,11 @@ test "Parse string" {
     const input = "\"Hello world\"";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .string);
     try testing.expectEqualStrings("Hello world", parsed.string.items);
@@ -373,11 +374,11 @@ test "Parse integer" {
     const input = "123";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .integer);
     try testing.expectEqual(parsed.integer, 123);
@@ -387,11 +388,11 @@ test "Parse negative integer" {
     const input = "-45";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .integer);
     try testing.expectEqual(parsed.integer, -45);
@@ -401,11 +402,11 @@ test "Parse fraction" {
     const input = "14.1";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .float);
     try testing.expectEqual(parsed.float, 14.1);
@@ -414,11 +415,11 @@ test "Parse exponential plus" {
     const input = "1.23e+4";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .float);
     try testing.expectEqual(parsed.float, 1.23e+4);
@@ -428,11 +429,11 @@ test "Parse exponential negative" {
     const input = "1.23e-4";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .float);
     try testing.expectEqual(parsed.float, 1.23e-4);
@@ -442,11 +443,11 @@ test "Parse array" {
     const input = "[1, 2, 3]";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .array);
     try testing.expect(parsed.array.items.len == 3);
@@ -464,11 +465,11 @@ test "Parse object" {
     ;
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .object);
     try testing.expectEqualStrings("zig", parsed.object.get("lang").?.string.items);
@@ -482,11 +483,11 @@ test "Parse object of jsonc style" {
         "}";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .object);
     try testing.expectEqualStrings("zig", parsed.object.get("lang").?.string.items);
@@ -508,11 +509,11 @@ test "Parse object with multi-line comment" {
         "}";
     const allocator = testing.allocator;
 
-    var parser = JsonParser.init(allocator, input);
-    defer parser.deinit();
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
 
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     try testing.expect(parsed == .object);
     try testing.expectEqualStrings("zig", parsed.object.get("lang").?.string.items);

@@ -19,9 +19,11 @@ test "parse from json file" {
     defer allocator.free(content);
 
     // Parse json
-    var parser = JsonParser.init(allocator, content);
+    var parser = try JsonParser.init(allocator, content);
+    defer parser.deinit(allocator);
+
     var parsed = try parser.parse(allocator);
-    defer parsed.deinit();
+    defer parsed.deinit(allocator);
 
     // Verify root object
     try testing.expect(parsed == .object);
@@ -32,7 +34,7 @@ test "parse from json file" {
     try testing.expect(root.get("location").? == .null);
     try testing.expect(root.get("rating").?.float == 4.5);
 
-    
+
     // Verify menu structure
     try testing.expect(root.get("menu").? == .array);
     const menu = root.get("menu").?.array;
