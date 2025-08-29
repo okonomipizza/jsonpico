@@ -52,6 +52,7 @@ pub const JsonParser = struct {
                 '[' => return self.parseArray(allocator),
                 '{' => return self.parseObject(allocator),
                 '0'...'9', '-', 'e', '.' => return try self.parseNumber(allocator),
+                '\n' => {},
                 else => return ParseError.UnexpectedCharacter,
             }
         }
@@ -175,7 +176,7 @@ pub const JsonParser = struct {
             if (char == ']') {
                 // Found closing quote
                 return JsonValue{ .array = array };
-            } else if (char == ' ') {
+            } else if (char == ' ' or char == '\n') {
                 try  self.skipWhiteAndComments();
                 self.idx -= 1;
             } else if (char == ',') {
