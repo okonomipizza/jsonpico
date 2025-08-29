@@ -34,7 +34,13 @@ pub const JsonValue = union(enum) {
                 }
                 self.object.deinit();
             },
-            .array => {
+            .array => |*arr| {
+                for (arr.items) |*item| {
+                    switch (item.*) {
+                        .string, .object, .array => item.deinit(),
+                        else => {},
+                    }
+                }
                 self.array.deinit();
             },
             .string => {
