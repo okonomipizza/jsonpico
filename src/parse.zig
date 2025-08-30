@@ -604,6 +604,36 @@ test "Parse object" {
     try testing.expectEqual(38, position.end);
 }
 
+test "Parse object has string array" {
+    const input =
+        \\{
+        \\  "lang": "English",
+        \\  "greeting": ["Good morning", "Hello", "Good evening"]
+        \\}
+    ;
+    const allocator = testing.allocator;
+
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
+
+    var parsed = try parser.parse(allocator);
+    defer parsed.deinit(allocator);
+
+    try testing.expect(parsed == .object);
+    try testing.expectEqualStrings("English", parsed.object.value.get("lang").?.string.value.items);
+    try testing.expect(parsed.object.value.get("greeting").? == .array);
+    const greeting = parsed.object.value.get("greeting").?.array;
+    try  testing.expectEqualStrings("Good morning", greeting.value.items[0].string.value.items);
+    try  testing.expectEqualStrings("Hello", greeting.value.items[1].string.value.items);
+    try  testing.expectEqualStrings("Good evening", greeting.value.items[2].string.value.items);
+
+    const parsed_id = parsed.object.id;
+    const position = parser.getValueRange(parsed_id).?;
+
+    try testing.expectEqual(0, position.start);
+    try testing.expectEqual(79, position.end);
+}
+
 test "Parse object of jsonc style" {
     const input = "{\n" ++
         "  \"lang\": \"zig\", // programming language\n" ++
