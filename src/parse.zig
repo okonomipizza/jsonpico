@@ -324,6 +324,8 @@ pub const JsonParser = struct {
             }
 
             if (self.getChar(self.idx) == '}') break;
+
+            return ParseError.UnterminatedObject;
         }
 
         if (self.idx >= self.json_str.len or self.getChar(self.idx) != '}') {
@@ -845,4 +847,22 @@ test "Correctly error occuerd (unexpected character)" {
     defer parser.deinit(allocator);
 
     try testing.expectError(ParseError.UnexpectedCharacter, parser.parse(allocator));
+}
+
+test "Correctly error occuerd (unterminated objects with comment)" {
+    const input =
+        \\{"game": "puzzle",
+        \\/* user configurable options
+        \\sound and difficulty */
+        \\"options": {"sound": true,
+        \\        "difficulty": 3         // max difficulty is 10},
+        \\"powerups": [   "speed", "shield"]
+        \\}
+    ;
+    const allocator = testing.allocator;
+
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
+
+    try testing.expectError(ParseError.UnterminatedObject, parser.parse(allocator));
 }
