@@ -3,7 +3,21 @@ const Allocator = std.mem.Allocator;
 
 const JsonValue = @import("type.zig").JsonValue;
 
-pub const ParseError = error{ UnterminatedString, SyntaxError, OutOfMemory, UnexpectedCharacter, InvalidComment };
+pub const ParseError = error{
+    // String parsing errors
+    UnterminatedString,
+    // Object parsing errors
+    UnterminatedObject,
+    // Array parsing errors
+    UnterminatedArray,
+    // empty element
+    EmptyElement,
+    // Character not supported errors
+    UnexpectedCharacter,
+    // Comments with invalid tokens
+    InvalidComment,
+    // General parsing errors
+    SyntaxError, OutOfMemory, EOF };
 
 pub const ValueRange = struct { start: usize, end: usize };
 
@@ -62,7 +76,7 @@ pub const JsonParser = struct {
                 '[' => return self.parseArray(allocator),
                 '{' => return self.parseObject(allocator),
                 '0'...'9', '-', 'e', '.' => return try self.parseNumber(allocator),
-                '\n' => {},
+                ' ', '\t', '\r', '\n' => {},
                 else => return ParseError.UnexpectedCharacter,
             }
         }
@@ -209,8 +223,15 @@ pub const JsonParser = struct {
         const start = self.idx;
 
         var array = try std.ArrayList(JsonValue).initCapacity(allocator, 10);
+        errdefer {
+            for (array.items) |*item| {
+                item.deinit(allocator);
+            }
+            array.deinit(allocator);
+        }
 
-        self.idx += 1; // Skip opening bracket
+        // Skip opening bracket
+        try self.advance();
 
         var commma = true;
         while (self.idx < self.json_str.len) : (self.idx += 1) {
@@ -229,55 +250,84 @@ pub const JsonParser = struct {
                 try self.skipWhiteAndComments(allocator);
                 self.idx -= 1;
             } else if (char == ',') {
-                if (commma) return error.SyntaxError;
+                // No element between ',' is not allowed.
+                // ex) [a, , c]
+                // TODO
+                if (commma) return ParseError.EmptyElement;
                 commma = true;
-                self.idx += 1;
+                try self.advance();
                 try self.skipWhiteAndComments(allocator);
                 self.idx -= 1;
             } else {
                 if (commma) {
-                    const parsed = try self.parse(allocator);
+                    const parsed = self.parse(allocator) catch {
+                        return ParseError.UnterminatedArray;
+                    };
                     try array.append(allocator, parsed);
                     commma = false;
                 }
             }
         }
 
-        return ParseError.SyntaxError;
+        return ParseError.UnterminatedArray;
     }
 
     fn parseObject(self: *Self, allocator: Allocator) ParseError!JsonValue {
         const value_id = self.generateId();
         const start = self.idx;
-        self.idx += 1; // Skip opening carly bracket
+        try self.advance(); // Skip opening carly bracket
 
         var object = std.StringArrayHashMap(JsonValue).init(allocator);
-        errdefer object.deinit();
+        errdefer {
+            var it = object.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                entry.value_ptr.deinit(allocator);
+            }
+            object.deinit();
+        }
 
         while (true) {
             try self.skipWhiteAndComments(allocator);
+
+            // Check for empty elements in object after key-value pair
+            // ex) { "key": "value", , "key2": "value2" }
+            if (self.getChar(self.idx) == ',') {
+                return ParseError.EmptyElement;
+            }
+
             var key = try self.parseString(allocator);
-            self.idx += 1; // Skip last '"' of the key string
+            errdefer key.deinit(allocator);
+
+            try self.advance(); // Skip last '"' of the key string
             try self.skipWhiteAndComments(allocator);
 
             if (self.getChar(self.idx) != ':') return error.SyntaxError;
 
-            self.idx += 1;
+            try self.advance();
             try self.skipWhiteAndComments(allocator);
 
-            const value = try self.parse(allocator);
+            var value = try self.parse(allocator);
+            errdefer value.deinit(allocator);
 
             try object.put(try key.toOwnedSlice(allocator), value);
 
-            self.idx += 1;
+            self.advance() catch {
+                return ParseError.UnterminatedObject;
+            };
+
             try self.skipWhiteAndComments(allocator);
 
             if (self.getChar(self.idx) == ',') {
-                self.idx += 1;
+                try self.advance();
                 continue;
             }
 
             if (self.getChar(self.idx) == '}') break;
+        }
+
+        if (self.idx >= self.json_str.len or self.getChar(self.idx) != '}') {
+            return ParseError.UnterminatedObject;
         }
 
         const end = self.idx;
@@ -316,10 +366,10 @@ pub const JsonParser = struct {
 
     /// Parse comments
     fn parseComment(self: *Self) !?ValueRange {
-        self.idx += 1;
+        try self.advance();
         var char: u8 = self.getChar(self.idx) orelse return null;
         if (char != '/' and char != '*') return error.InvalidComment;
-        self.idx += 1;
+        try self.advance();
         try self.skipWhite();
 
         const start = self.idx; // Keep start offset of this comment
@@ -330,7 +380,7 @@ pub const JsonParser = struct {
             break :blk false;
         };
 
-        self.idx += 1;
+        try self.advance();
 
         while (true) : (self.idx += 1) {
             char = self.getChar(self.idx) orelse {
@@ -348,7 +398,7 @@ pub const JsonParser = struct {
                     .end = self.idx - 1,
                 };
             } else if (char == '*') {
-                self.idx += 1;
+                try self.advance();
                 char = self.getChar(self.idx) orelse return error.InvalidComment;
                 if (char == '/') {
                     return ValueRange{
@@ -359,6 +409,13 @@ pub const JsonParser = struct {
                     return error.InvalidComment;
                 }
             }
+        }
+    }
+
+    fn advance(self: *Self) ParseError!void {
+        self.idx += 1;
+        if (self.idx >= self.json_str.len) {
+            return ParseError.EOF;
         }
     }
 
@@ -604,11 +661,38 @@ test "Parse object" {
     try testing.expectEqual(38, position.end);
 }
 
+test "Parse object with empty line at first" {
+    const input =
+        \\  
+        \\{
+        \\  "lang": "zig",
+        \\  "version" : 0.14
+        \\}
+    ;
+    const allocator = testing.allocator;
+
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
+
+    var parsed = try parser.parse(allocator);
+    defer parsed.deinit(allocator);
+
+    try testing.expect(parsed == .object);
+    try testing.expectEqualStrings("zig", parsed.object.value.get("lang").?.string.value.items);
+    try testing.expectEqual(0.14, parsed.object.value.get("version").?.float.value);
+
+    const parsed_id = parsed.object.id;
+    const position = parser.getValueRange(parsed_id).?;
+
+    try testing.expectEqual(3, position.start);
+    try testing.expectEqual(41, position.end);
+}
+
 test "Parse object has string array" {
     const input =
         \\{
         \\  "lang": "English",
-        \\  "greeting": ["Good morning", "Hello", "Good evening"]
+        \\  "greeting": [  "Good morning" , "Hello", "Good evening"]
         \\}
     ;
     const allocator = testing.allocator;
@@ -623,15 +707,15 @@ test "Parse object has string array" {
     try testing.expectEqualStrings("English", parsed.object.value.get("lang").?.string.value.items);
     try testing.expect(parsed.object.value.get("greeting").? == .array);
     const greeting = parsed.object.value.get("greeting").?.array;
-    try  testing.expectEqualStrings("Good morning", greeting.value.items[0].string.value.items);
-    try  testing.expectEqualStrings("Hello", greeting.value.items[1].string.value.items);
-    try  testing.expectEqualStrings("Good evening", greeting.value.items[2].string.value.items);
+    try testing.expectEqualStrings("Good morning", greeting.value.items[0].string.value.items);
+    try testing.expectEqualStrings("Hello", greeting.value.items[1].string.value.items);
+    try testing.expectEqualStrings("Good evening", greeting.value.items[2].string.value.items);
 
     const parsed_id = parsed.object.id;
     const position = parser.getValueRange(parsed_id).?;
 
     try testing.expectEqual(0, position.start);
-    try testing.expectEqual(79, position.end);
+    try testing.expectEqual(82, position.end);
 }
 
 test "Parse object of jsonc style" {
@@ -703,4 +787,62 @@ test "Parse object with multi-line comment" {
     const comment_range = parser.comment_ranges.items[0];
     const comment = parser.json_str[comment_range.start .. comment_range.end + 1];
     try testing.expectEqualStrings("\n  multi-line\n   comments\n   ", comment);
+}
+
+test "Correctly error occuerd (unterminated object)" {
+    const input =
+        \\{
+        \\  "lang": "zig",
+        \\  "version" : 0.14
+    ;
+    const allocator = testing.allocator;
+
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
+
+    try testing.expectError(ParseError.UnterminatedObject, parser.parse(allocator));
+}
+
+test "Correctly error occuerd (empty object element)" {
+    const input =
+        \\{
+        \\  "lang": "zig",,
+        \\  "version" : 0.14
+        \\{
+        \\    "key": "value",,
+        \\    "key2": "value2"
+        \\}
+    ;
+    const allocator = testing.allocator;
+
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
+
+    try testing.expectError(ParseError.EmptyElement, parser.parse(allocator));
+}
+
+test "Correctly error occuerd (unterminated array)" {
+    const input =
+        \\{
+        \\ "array": [1, 2,
+        \\}
+    ;
+    const allocator = testing.allocator;
+
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
+
+    try testing.expectError(ParseError.UnterminatedArray, parser.parse(allocator));
+}
+
+test "Correctly error occuerd (unexpected character)" {
+    const input =
+        \\ @
+    ;
+    const allocator = testing.allocator;
+
+    var parser = try JsonParser.init(allocator, input);
+    defer parser.deinit(allocator);
+
+    try testing.expectError(ParseError.UnexpectedCharacter, parser.parse(allocator));
 }
